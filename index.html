@@ -1811,4 +1811,421 @@
               enterBtn.disabled = true;
               accessBanner.className = "status-banner error";
               accessBanner.innerHTML = '🗑️ <strong>Room Not Found:</strong> It may have been deleted by the host.';
-              messagesList.innerHTML = '<div class="empty-state"><span>🗑️</span>Room no
+              messagesList.innerHTML = '<div class="empty-state"><span>🗑️</span>Room no longer exists.</div>';
+              return;
+            }
+            if (!invite || invite.revoked) {
+              isAuthorized = false;
+              enterBtn.disabled = true;
+              accessBanner.className = "status-banner error";
+              accessBanner.innerHTML = '⛔ <strong>Pass Revoked:</strong> Your invite for this room is no longer valid.';
+              messagesList.innerHTML = '<div class="empty-state"><span>🔒</span>Access revoked by host.</div>';
+              return;
+            }
+            isAuthorized = true;
+            activeInvite = invite;
+            boardTitle.textContent = "📬 " + (meta.title || saved.title || 'Cozy Lounge');
+            usernameInput.value = (invite.lockName && invite.allowedName) ? invite.allowedName : (saved.lastName || invite.allowedName || '');
+            usernameInput.readOnly = Boolean(invite.lockName && invite.allowedName);
+            enterBtn.disabled = false;
+            accessBanner.className = "status-banner verified";
+            accessBanner.innerHTML = '✅ <strong>Verified Invite Pass</strong> restored for <strong>' + escapeHtml(boardTitle.textContent) + '</strong>.';
+            updatePreview();
+            if (usernameInput.value.trim()) {
+              enterOrUpdate();
+            } else {
+              subscribeToActiveRoom();
+            }
+          });
+        }
+      }
+
+      function startFreshHostRoom() {
+        if (currentUser && activeRoomId) {
+          stopPresenceHeartbeat();
+          store.removePresence(activeRoomId, SESSION_ID);
+        }
+        if (unsubscribeRoom) {
+          unsubscribeRoom();
+          unsubscribeRoom = null;
+        }
+
+        activeRoomId = randomId("rm");
+        isHost = true;
+        isAuthorized = true;
+        activeInvite = null;
+        currentUser = null;
+        lastMessagesKey = "";
+        safeStorage.set(LAST_HOST_ROOM_KEY, activeRoomId);
+        try { window.history.replaceState({}, "", window.location.pathname); } catch (e) {}
+
+        roomTitleGroup.classList.remove('hidden');
+        roomTitleInput.value = "New Lounge";
+        usernameInput.readOnly = false;
+        enterBtn.disabled = false;
+        enterBtn.innerHTML = '<span>📨</span> Create &amp; Enter Lounge';
+        setComposerEnabled(false);
+
+        openQrModalBtn.classList.add('hidden');
+        leaveRoomBtn.classList.add('hidden');
+        clearChatBtn.classList.add('hidden');
+        deleteRoomBtn.classList.add('hidden');
+        presenceStrip.classList.add('hidden');
+
+        boardTitle.textContent = "📬 New Lounge";
+        roomSubtitle.textContent = "Room ID: " + activeRoomId + " · Host setup";
+        accessBanner.className = "status-banner host";
+        accessBanner.innerHTML = '🏠 <strong>New Room Ready:</strong> Your previous rooms remain safely saved below until deleted.';
+        messagesList.innerHTML = '<div class="empty-state"><span>✨</span>Fresh room created.<br>Enter your name and click <strong>Create &amp; Enter Lounge</strong>.</div>';
+        messageCount.textContent = "0 messages";
+        renderSavedRooms();
+      }
+
+      // =========================================================================
+      // MESSAGING & TYPING
+      // =========================================================================
+      function sendMessage() {
+        if (!currentUser || !isAuthorized) return;
+        var text = messageInput.value.trim();
+        if (!text) return;
+
+        isCurrentlyTyping = false;
+        if (typingTimeout) clearTimeout(typingTimeout);
+        syncMyPresence(false);
+
+        store.addMessage(activeRoomId, {
+          id: randomId("msg"),
+          author: currentUser.name,
+          avatar: currentUser.avatar,
+          accent: currentUser.accent,
+          senderSessionId: SESSION_ID,
+          text: text,
+          timestamp: Date.now()
+        });
+
+        messageInput.value = '';
+        messageInput.style.height = 'auto';
+        messageInput.focus();
+      }
+
+      function handleTypingActivity() {
+        if (!currentUser || !isAuthorized) return;
+        var hasText = messageInput.value.trim().length > 0;
+
+        if (hasText && !isCurrentlyTyping) {
+          isCurrentlyTyping = true;
+          syncMyPresence(true);
+        }
+        if (typingTimeout) clearTimeout(typingTimeout);
+        typingTimeout = setTimeout(function () {
+          if (isCurrentlyTyping) {
+            isCurrentlyTyping = false;
+            syncMyPresence(false);
+          }
+        }, 2200);
+      }
+
+      // =========================================================================
+      // QR INVITES & CLOUD CONFIG
+      // =========================================================================
+      function generateQrInvite() {
+        if (!isHost || !activeRoomId) return;
+        var allowedName = inviteUserInput.value.trim();
+        var lockName = Boolean(lockInviteName.checked && allowedName);
+        var token = randomId("inv");
+
+        store.createInvite(activeRoomId, {
+          token: token,
+          allowedName: allowedName,
+          lockName: lockName,
+          revoked: false,
+          createdAt: Date.now()
+        }).then(function () {
+          var baseUrl = (window.location.origin && window.location.origin !== "null" ? window.location.origin : "") + window.location.pathname;
+          var params = new URLSearchParams({ room: activeRoomId, token: token });
+          currentInviteUrl = baseUrl + "?" + params.toString();
+
+          qrResultBox.classList.remove('hidden');
+          inviteUrlPreview.textContent = currentInviteUrl;
+          qrContainer.innerHTML = "";
+
+          if (typeof QRCode !== "undefined") {
+            new QRCode(qrContainer, {
+              text: currentInviteUrl,
+              width: 172,
+              height: 172,
+              colorDark: "#0f172a",
+              colorLight: "#ffffff",
+              correctLevel: QRCode.CorrectLevel.M
+            });
+          } else {
+            qrContainer.innerHTML = '<span style="font-size:0.82rem;color:#64748b;">QR library still loading or offline. Copy the invite link below.</span>';
+          }
+          inviteUserInput.value = "";
+        });
+      }
+
+      function parseFirebaseConfigInput(raw) {
+        var trimmed = raw.trim();
+        if (!trimmed) throw new Error("Please paste your Firebase config first.");
+        var match = trimmed.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error("Could not find a { ... } config object.");
+        var objText = match[0]
+          .replace(/(['"])?([a-zA-Z0-9_]+)(['"])?\s*:/g, '"$2":')
+          .replace(/'/g, '"')
+          .replace(/,\s*}/g, '}');
+        var parsed = JSON.parse(objText);
+        if (!parsed.apiKey || !parsed.databaseURL) {
+          throw new Error("Config must include at least apiKey and databaseURL.");
+        }
+        return parsed;
+      }
+
+      // =========================================================================
+      // BIND EVENTS & BOOT IMMEDIATELY
+      // =========================================================================
+      function bindEvents() {
+        usernameInput.addEventListener('input', updatePreview);
+        enterBtn.addEventListener('click', enterOrUpdate);
+        leaveRoomBtn.addEventListener('click', leaveRoom);
+        newRoomBtn.addEventListener('click', startFreshHostRoom);
+        sendBtn.addEventListener('click', sendMessage);
+
+        messageInput.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+          }
+        });
+        messageInput.addEventListener('input', function () {
+          this.style.height = 'auto';
+          this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+          handleTypingActivity();
+        });
+
+        clearChatBtn.addEventListener('click', function () {
+          if (!isHost || !activeRoomId) return;
+          if (confirm("Delete all chat messages in this room? This cannot be undone.")) {
+            store.clearMessages(activeRoomId);
+          }
+        });
+
+        deleteRoomBtn.addEventListener('click', function () {
+          if (!isHost || !activeRoomId) return;
+          if (confirm("Permanently delete this entire room, all messages, and all QR invites?")) {
+            var oldRoom = activeRoomId;
+            stopPresenceHeartbeat();
+            if (unsubscribeRoom) { unsubscribeRoom(); unsubscribeRoom = null; }
+            store.deleteRoom(oldRoom).then(function () {
+              forgetSavedRoom(oldRoom);
+              safeStorage.remove(LAST_HOST_ROOM_KEY);
+              startFreshHostRoom();
+            });
+          }
+        });
+
+        openQrModalBtn.addEventListener('click', function () {
+          renderInvitesList();
+          qrModal.classList.add('open');
+        });
+        closeQrModalBtn.addEventListener('click', function () { qrModal.classList.remove('open'); });
+        qrModal.addEventListener('click', function (e) { if (e.target === qrModal) qrModal.classList.remove('open'); });
+        generateQrBtn.addEventListener('click', generateQrInvite);
+
+        copyInviteBtn.addEventListener('click', function () {
+          if (!currentInviteUrl) return;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(currentInviteUrl).then(function () {
+              copyInviteBtn.textContent = "✅ Copied!";
+              setTimeout(function () { copyInviteBtn.textContent = "📋 Copy Invite Link"; }, 1200);
+            });
+          } else {
+            prompt("Copy this invite link:", currentInviteUrl);
+          }
+        });
+
+        downloadQrBtn.addEventListener('click', function () {
+          var canvas = qrContainer.querySelector('canvas');
+          var img = qrContainer.querySelector('img');
+          var dataUrl = canvas ? canvas.toDataURL('image/png') : (img ? img.src : "");
+          if (!dataUrl) return;
+          var a = document.createElement('a');
+          a.href = dataUrl;
+          a.download = "lounge-invite-" + activeRoomId + ".png";
+          a.click();
+        });
+
+        openSyncModalBtn.addEventListener('click', function () {
+          cloudConfigStatus.textContent = "";
+          syncModal.classList.add('open');
+        });
+        closeSyncModalBtn.addEventListener('click', function () { syncModal.classList.remove('open'); });
+        syncModal.addEventListener('click', function (e) { if (e.target === syncModal) syncModal.classList.remove('open'); });
+
+        saveCloudConfigBtn.addEventListener('click', function () {
+          try {
+            var parsed = parseFirebaseConfigInput(firebaseConfigInput.value);
+            safeStorage.set(SAVED_FB_KEY, JSON.stringify(parsed));
+            cloudConfigStatus.textContent = "✅ Saved! Reloading in Realtime Live mode…";
+            setTimeout(function () { location.reload(); }, 400);
+          } catch (err) {
+            cloudConfigStatus.textContent = "❌ " + err.message;
+          }
+        });
+
+        resetCloudConfigBtn.addEventListener('click', function () {
+          safeStorage.remove(SAVED_FB_KEY);
+          location.reload();
+        });
+
+        exportHtmlBtn.addEventListener('click', function () {
+          try {
+            var cfg = parseFirebaseConfigInput(firebaseConfigInput.value);
+            var replacement =
+              "// __FIREBASE_CONFIG_START__\n" +
+              "      var FIREBASE_CONFIG = " + JSON.stringify(cfg, null, 8).replace(/\n/g, "\n      ") + ";\n" +
+              "      // __FIREBASE_CONFIG_END__";
+            var updatedHtml = RAW_HTML_SNAPSHOT.replace(
+              /\/\/ __FIREBASE_CONFIG_START__[\s\S]*?\/\/ __FIREBASE_CONFIG_END__/,
+              replacement
+            );
+            var blob = new Blob([updatedHtml], { type: "text/html;charset=utf-8" });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = "index.html";
+            a.click();
+            URL.revokeObjectURL(url);
+            cloudConfigStatus.textContent = "✅ Downloaded configured index.html! Upload this file to your host.";
+          } catch (err) {
+            cloudConfigStatus.textContent = "❌ " + err.message;
+          }
+        });
+
+        window.addEventListener('beforeunload', function () {
+          if (currentUser && activeRoomId) {
+            store.removePresence(activeRoomId, SESSION_ID);
+          }
+        });
+      }
+
+      function bootApp() {
+        // 1. Render UI synchronously right away (never stays blank!)
+        renderAvatars();
+        renderAccents();
+        renderSavedRooms();
+        updatePreview();
+        setComposerEnabled(false);
+        bindEvents();
+
+        if (activeFbConfig) {
+          firebaseConfigInput.value = JSON.stringify(activeFbConfig, null, 2);
+          resetCloudConfigBtn.classList.remove('hidden');
+        }
+
+        // 2. Connect Firebase if configured, then load room data
+        initFirebaseIfConfigured().then(function (connected) {
+          if (connected) {
+            syncStatusBadge.className = "badge live";
+            syncStatusBadge.textContent = "🟢 Realtime Live";
+            openSyncModalBtn.textContent = "⚙️ Cloud Connected";
+          } else {
+            syncStatusBadge.className = "badge demo";
+            syncStatusBadge.textContent = "🟡 Local Realtime";
+          }
+
+          var urlParams = new URLSearchParams(window.location.search);
+          var paramRoom = urlParams.get("room");
+          var paramToken = urlParams.get("token");
+
+          if (paramRoom) {
+            activeRoomId = paramRoom;
+            isHost = false;
+            roomTitleGroup.classList.add('hidden');
+
+            if (!paramToken) {
+              isAuthorized = false;
+              enterBtn.disabled = true;
+              accessBanner.className = "status-banner error";
+              accessBanner.innerHTML = '⛔ <strong>Invite Required:</strong> This private room requires a valid QR invite link from the host.';
+              messagesList.innerHTML = '<div class="empty-state"><span>🔒</span>Private Lounge.<br>Scan a valid QR invite from the host to enter.</div>';
+              return;
+            }
+
+            Promise.all([
+              store.getInvite(activeRoomId, paramToken),
+              store.getRoomMeta(activeRoomId)
+            ]).then(function (res) {
+              var invite = res[0];
+              var meta = res[1];
+              if (!meta) {
+                isAuthorized = false;
+                enterBtn.disabled = true;
+                accessBanner.className = "status-banner error";
+                accessBanner.innerHTML = fbDb
+                  ? '🗑️ <strong>Room Not Found:</strong> This room does not exist or was deleted by the host.'
+                  : '⛔ <strong>Room Not Found Locally:</strong> In Local mode, QR links only work inside the same browser. Open <strong>⚙️ Cloud Sync</strong> to connect Firebase across phones.';
+                messagesList.innerHTML = '<div class="empty-state"><span>🔒</span>Unable to open room.</div>';
+              } else if (!invite || invite.revoked) {
+                isAuthorized = false;
+                enterBtn.disabled = true;
+                accessBanner.className = "status-banner error";
+                accessBanner.innerHTML = '⛔ <strong>Invalid or Revoked Pass:</strong> Ask the host for a fresh QR code.';
+                messagesList.innerHTML = '<div class="empty-state"><span>🔒</span>Invite pass invalid or revoked.</div>';
+              } else {
+                isAuthorized = true;
+                activeInvite = invite;
+                boardTitle.textContent = "📬 " + (meta.title || "Cozy Lounge");
+                roomSubtitle.textContent = "Room ID: " + activeRoomId + " · Invited Guest · Kept until deleted";
+
+                var prevSaved = getSavedRooms()[activeRoomId];
+                if (invite.allowedName) {
+                  usernameInput.value = invite.allowedName;
+                  if (invite.lockName) usernameInput.readOnly = true;
+                } else if (prevSaved && prevSaved.lastName) {
+                  usernameInput.value = prevSaved.lastName;
+                }
+                if (prevSaved && prevSaved.lastAvatar) { selectedAvatar = prevSaved.lastAvatar; renderAvatars(); }
+                if (prevSaved && prevSaved.lastAccent) { selectedAccent = prevSaved.lastAccent; renderAccents(); }
+                updatePreview();
+
+                accessBanner.className = "status-banner verified";
+                accessBanner.innerHTML = invite.allowedName
+                  ? ('✅ <strong>Verified Invite Pass</strong> for <strong>' + escapeHtml(invite.allowedName) + '</strong>. Click Enter Lounge to chat!')
+                  : '✅ <strong>Verified Invite Pass!</strong> Enter your name and join.';
+                enterBtn.innerHTML = '<span>📨</span> Enter Lounge';
+                subscribeToActiveRoom();
+              }
+            });
+          } else {
+            isHost = true;
+            isAuthorized = true;
+            activeRoomId = safeStorage.get(LAST_HOST_ROOM_KEY) || randomId("rm");
+            safeStorage.set(LAST_HOST_ROOM_KEY, activeRoomId);
+
+            var saved = getSavedRooms()[activeRoomId];
+            if (saved && saved.lastName) usernameInput.value = saved.lastName;
+            if (saved && saved.lastAvatar) { selectedAvatar = saved.lastAvatar; renderAvatars(); }
+            if (saved && saved.lastAccent) { selectedAccent = saved.lastAccent; renderAccents(); }
+            updatePreview();
+
+            store.getRoomMeta(activeRoomId).then(function (existingMeta) {
+              if (existingMeta && existingMeta.title) {
+                roomTitleInput.value = existingMeta.title;
+                boardTitle.textContent = "📬 " + existingMeta.title;
+              }
+              roomSubtitle.textContent = "Room ID: " + activeRoomId + " · Host setup · Kept until deleted";
+              newRoomBtn.classList.remove('hidden');
+              clearChatBtn.classList.remove('hidden');
+              deleteRoomBtn.classList.remove('hidden');
+              subscribeToActiveRoom();
+            });
+          }
+        });
+      }
+
+      bootApp();
+    })();
+  </script>
+</body>
+</html>
